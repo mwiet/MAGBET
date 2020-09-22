@@ -1,7 +1,8 @@
 
 
     ##########################################
-    ##  magnification_module.py             ##
+    ##  MAGBET_module.py                    ##
+    ##  MAGnification Bias EsTimator        ##
     ##  Maximilian von Wietersheim-Kramsta  ##
     ##  Version 2020.09.22                  ##
     ##########################################
