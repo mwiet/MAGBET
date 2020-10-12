@@ -1,7 +1,7 @@
 # MAGBET
 MAGnification Bias EsTimator
 
-![alt text](https://i.ibb.co/xMVPTv3/MAGBET.jpg)
+![alt text](magbet.png)
 
 Required Python 3 modules:
 - healpy
