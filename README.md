@@ -9,6 +9,5 @@ Required Python 3 modules:
 - numpy
 - scipy
 - collections
-- statistics
 - os
 - matplotlib
