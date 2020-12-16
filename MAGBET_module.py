@@ -1,8 +1,7 @@
 
 
     ##########################################
-    ##  MAGBET_module.py                    ##
-    ##  MAGnification Bias EsTimator        ##
+    ##  magnification_module.py             ##
     ##  Maximilian von Wietersheim-Kramsta  ##
     ##  Version 2020.09.22                  ##
     ##########################################
@@ -14,7 +13,6 @@ import astropy.io.fits as fits
 import os
 from scipy.optimize import curve_fit
 from collections.abc import Iterable
-import statistics as st
 from scipy.signal import find_peaks
 
 def read_MICE2_fits(filename, dilution, mag_limited, mag_limit_band, mag_limit):
@@ -42,8 +40,13 @@ def read_MICE2_fits(filename, dilution, mag_limited, mag_limit_band, mag_limit):
         
         mag   = data[mag_limit_band]
         
-        kappa = data['kappa']
-        kappa = kappa[mag < mag_limit]
+        kappa   = data['kappa']
+        gamma_1 = data['gamma1']
+        gamma_2 = data['gamma2']
+        
+        kappa   = kappa[mag < mag_limit]
+        gamma_1 = gamma_1[mag < mag_limit]
+        gamma_2 = gamma_2[mag < mag_limit]
         
         try:
             z = data['z_cgal_v']
@@ -60,7 +63,7 @@ def read_MICE2_fits(filename, dilution, mag_limited, mag_limit_band, mag_limit):
             dec_mag = dec_mag[mag < mag_limit]
             ra_mag[ra_mag < 0] = ra_mag[ra_mag < 0] + 2*np.pi
             dec_mag = dec_mag + np.pi/2
-            return ra_mag, dec_mag, kappa, z
+            return ra_mag, dec_mag, kappa, gamma_1, gamma_2, z
         
         else:  
             ra  = data['ra_gal']*np.pi/180.
@@ -69,10 +72,12 @@ def read_MICE2_fits(filename, dilution, mag_limited, mag_limit_band, mag_limit):
             dec =  dec[mag < mag_limit]
             ra[ra < 0] = ra[ra < 0] + 2*np.pi
             dec = dec + np.pi/2
-            return ra, dec, kappa, z
+            return ra, dec, kappa, gamma_1, gamma_2, z
         
     else:      
-        kappa = data['kappa']
+        kappa   = data['kappa']
+        gamma_1 = data['gamma1']
+        gamma_2 = data['gamma2']
         
         try:
             z = data['z_cgal_v']
@@ -85,14 +90,14 @@ def read_MICE2_fits(filename, dilution, mag_limited, mag_limit_band, mag_limit):
             dec_mag = data['dec_gal_mag']*np.pi/180.
             ra_mag[ra_mag < 0] = ra_mag[ra_mag < 0] + 2*np.pi
             dec_mag = dec_mag + np.pi/2
-            return ra_mag, dec_mag, kappa, z
+            return ra_mag, dec_mag, kappa, gamma_1, gamma_2, z
         
         else:  
             ra  = data['ra_gal']*np.pi/180.
             dec = data['dec_gal']*np.pi/180.
             ra[ra < 0] = ra[ra < 0] + 2*np.pi
             dec = dec + np.pi/2
-            return ra, dec, kappa, z
+            return ra, dec, kappa, gamma_1, gamma_2, z
 
         
 def hp_map(ra, dec, kappa, z, nside):
@@ -151,7 +156,43 @@ def hp_map(ra, dec, kappa, z, nside):
         kappa_pix[npix[i]] = np.mean(kappa[index]) #Determine mean kappa in each pixel
     return m, kappa_pix, npix_index
 
+def hp_map_strong(ra, dec, kappa, gamma_1, gamma_2, z, nside):
+    """Builds HealPix map of the number counts of a given field.
+    IN:
+    - ra (numpy.ndarray):   Right Acension in radians
+    - dec (numpy.ndarray):  Declination in radians
+    - kappa (numpy.ndarray):Projected matter density
+    - z (numpy.ndarray):    Redshift
+    - nside (int):          Resultion of the HealPix pixelation. Must be a power of 2
+    
+    OUT:
+    - m (numpy.ndarray):                  HealPix map of the number counts
+    - magnification_pix (numpy.ndarray):  Healpix map of the average magnification factor
+    - npix_index (numpy.ndarray):         Indices of the HealPix map which are within the observed field
+    """
+    npix = hp.ang2pix(nside, dec, ra) #Find pixel index for each object
+    npix_count = np.bincount(npix) #Find counts of objects within each pixel
 
+    #---------------------------------
+
+    npix_index    = np.nonzero(npix_count)[0] #Find pixels within field (pixels with zero counts are excluded, but can be recovered later if they gain a count)
+
+    m = np.zeros(hp.nside2npix(nside))
+    m[npix_index] = npix_count[npix_index] #Fill map of the full sky with field
+    magnification_pix = np.zeros(hp.nside2npix(nside))
+    
+    gamma = np.sqrt(np.power(gamma_1, 2) + np.power(gamma_2, 2))
+
+    for i in range(len(npix)):
+        index = np.where(npix == npix[i])
+        
+        magn = np.power(np.absolute(np.power(1 - kappa[index], 2) - np.power(gamma[index], 2)), -1)
+        
+        magnification_pix[npix[i]] = np.mean(magn) #Determine mean magnification factor in each pixel
+        
+        
+    return m, magnification_pix, npix_index   
+    
 
 def test_field(ra, dec, ramag, decmag, nside, npix_index, dilution):
   """Test function which compares the field of pixels taken from the whole sky by only considering non-zero pixels 
@@ -362,6 +403,171 @@ def compare_mag(ra, dec, kappa, z, ramag, decmag, kappamag, zmag, nside, redshif
 
 
 
+def compare_mag_strong(ra, dec, kappa, gamma_1, gamma_2, z, ramag, decmag, kappamag, gamma_1mag, gamma_2mag, zmag, nside, redshift_range=np.array([None]), dilution = True, tessellation = True, nside_tes = None, mag_limited = False, mag_limit_band = None, mag_limit = None):
+    """Compares two populations of objects, one unmagnified and one magnified, by determining the ration between the counts within each pixel of a certain HealPix pixelation,
+    their respective magnification factor and the uncertanties.
+
+    IN:
+    - ra (numpy.ndarray):       Right Acension in radians of the objects within the unmagnified field
+    - dec (numpy.ndarray):      Declination in radians of the objects within the unmagnified field
+    - kappa (numpy.ndarray):    Projected matter density of the objects within the unmagnified field
+    - z
+    - gamma_1
+    - gamma_2
+    - ramag (numpy.ndarray):    Right Acension in radians of the objects within the magnified field
+    - decmag (numpy.ndarray):   Declination in radians of the objects within the magnified field
+    - kappamag (numpy.ndarray): Projected matter density of the objects within the magnified field
+    - zmag
+    - gamma_1mag
+    - gamma_2mag
+    - nside (int):              Resolution of the HealPix pixelation. Must be a power of 2
+    - redshift_range (iterable):n-componenet iterable object specifying the limits of the desired redshift bins.
+    - dilution (bool):          If True, coordinates after magnification are considered and dilution factor is included in analysis of magnification.
+    - tessellation (bool):      If True, the field will be subdivided into tiles given by HealPix pixels
+    - nside_tes (int):          Resolution of the HealPix pixelation used for the tiles. Must be a power of 
+    - mag_limited (bool):       If True, the galaxy sample is treated as if it has a definate magnitude limit. In that case, one needs to specify the mag_limit_band and the mag_limit.
+    - mag_limit_band (str):     String containing the name of the column which contains the band magnitude with which the flux/magnitude limit of the sample has been set.
+    - mag_limit (float):        Float specifying the magnitude limit in the band magnitude specifid in mag_limit_band.
+    
+    OUT:
+    - ratio_list(numpy.ndarray):       Array of the ratio between the magnified number counts and the unmagnified number counts for each redshift bin and each tile (dim = no. redshift bins x no. of tiles x no. of pixels in each tile)
+    - magn_list(numpy.ndarray):        Array of the mean value of the magnification within each pixel, for each redshift bin and each tile (dim = no. redshift bins x no. of tiles x no. of pixels in each tile)
+    - unc_list (numpy.ndarray):        Array of the uncertainty on the ratios within each pixel, for each redshift bin and each tile (dim = no. redshift bins x no. of tiles x no. of pixels in each tile)
+    """
+    
+    
+    if redshift_range.all() != None and len(redshift_range) != 1:
+        if not isinstance(redshift_range, Iterable) or len(redshift_range) < 2:
+            raise Exception('Redshift range has to be an iterable object of length > 2.')
+    else:
+        redshift_range = np.array([min([min(z), min(zmag)]), max([max(z), max(zmag)])])
+    
+    
+    ratio_list, magn_list, unc_list = [], [], []
+    for j in range(0, len(redshift_range)-1):
+        zmin = redshift_range[j]
+        zmax = redshift_range[j+1]
+        
+        ra_j       = ra[(zmin <= z) & (z < zmax)]
+        dec_j      = dec[(zmin <= z) & (z < zmax)]
+        kappa_j    = kappa[(zmin <= z) & (z < zmax)]
+        z_j        = z[(zmin <= z) & (z < zmax)]
+        gamma_1_j  = gamma_1[(zmin <= z) & (z < zmax)]
+        gamma_2_j  = gamma_2[(zmin <= z) & (z < zmax)]
+        
+        ramag_j       = ramag[(zmin <= zmag) & (zmag < zmax)]
+        decmag_j      = decmag[(zmin <= zmag) & (zmag < zmax)]
+        kappamag_j    = kappamag[(zmin <= zmag) & (zmag < zmax)]
+        zmag_j        = zmag[(zmin <= zmag) & (zmag < zmax)]
+        gamma_1mag_j  = gamma_1mag[(zmin <= zmag) & (zmag < zmax)]
+        gamma_2mag_j  = gamma_2mag[(zmin <= zmag) & (zmag < zmax)]
+
+        if tessellation == True:
+            if nside_tes != None:
+                no_mag_tiles_pix = hp.ang2pix(nside_tes, dec_j, ra_j)
+                mag_tiles_pix    = hp.ang2pix(nside_tes, decmag_j, ramag_j)
+                common_tiles     = np.unique(np.intersect1d(no_mag_tiles_pix, mag_tiles_pix))
+                
+                ratio_list_j, magn_list_j, unc_list_j = [], [], []
+                n = 0
+                for i in common_tiles: #Divides pixels into non-overlapping spatial tiles
+                    ra_i          = ra_j[no_mag_tiles_pix == i] 
+                    dec_i         = dec_j[no_mag_tiles_pix == i]
+                    kappa_i       = kappa_j[no_mag_tiles_pix == i]
+                    z_i           = z_j[no_mag_tiles_pix == i]
+                    gamma_1_i     = gamma_1_j[no_mag_tiles_pix == i]
+                    gamma_2_i     = gamma_2_j[no_mag_tiles_pix == i]
+                    ramag_i       = ramag_j[mag_tiles_pix == i]
+                    decmag_i      = decmag_j[mag_tiles_pix == i]
+                    kappamag_i    = kappamag_j[mag_tiles_pix == i]
+                    zmag_i        = zmag_j[mag_tiles_pix == i]
+                    gamma_1mag_i  = gamma_1mag_j[mag_tiles_pix == i]
+                    gamma_2mag_i  = gamma_2mag_j[mag_tiles_pix == i]
+                    
+                    c_map, magnification_map, npix_index        = hp_map_strong(ra_i, dec_i, kappa_i, gamma_1_i, gamma_2_i, z_i, nside)                    #Create unmagnified HealPix map
+                    mapmag, magnification_mapmag, npix_indexmag = hp_map_strong(ramag_i, decmag_i, kappamag_i, gamma_1mag_i, gamma_2mag_i, zmag_i, nside)  #Create magnified HealPix map
+                    
+                    npix_index = np.unique(np.concatenate((npix_index, npix_indexmag), axis=0)) #Take all non-zero pixels from either sample         
+                    
+                    map_reduced         = c_map[npix_index]
+                    mapmag_reduced      = mapmag[npix_index]
+                    magn_mapmag_reduced = magnification_mapmag[npix_index]
+                    
+                    zero_to_one = np.where(map_reduced == 0)[0] #Find any edge cases
+                    one_to_zero = np.where(mapmag_reduced == 0)[0]
+                    to_remove   = np.concatenate((zero_to_one, one_to_zero))
+                    
+                    print('For {3} < z < {4}, in tile {0} with {1} galaxies in {2} pixels'.format(n, len(ra_i), len(map_reduced), round(zmin, 3), round(zmax, 3)))
+                    print('Excluded {2} pixels with counts going from 0 to 1 in tile {1}: {0}'.format(np.array2string(zero_to_one, separator = ','), n, len(zero_to_one)))
+                    print('Excluded {2} pixels with counts going from 1 to 0 in tile {1}: {0}'.format(np.array2string(one_to_zero, separator = ','), n, len(one_to_zero)))
+                    
+                    mapmag_reduced = np.delete(mapmag_reduced, to_remove) #Remove edge cases
+                    magn_reduced  = np.delete(magn_mapmag_reduced, to_remove)
+                    map_reduced    = np.delete(map_reduced, to_remove)
+                    
+                    vec         = np.array([map_reduced, mapmag_reduced])
+                    cov         = np.cov(vec)
+                    corr        = cov[0][1]/(np.std(vec[0])*np.std(vec[1])) #Determine Pearson correlation factor between samples
+                    ratio       = np.divide(mapmag_reduced, map_reduced)
+                    
+                    uncertainty = np.multiply(np.divide(1, map_reduced), np.sqrt(np.absolute(np.multiply(mapmag_reduced, 1 + ratio - 2*corr*np.sqrt(ratio))))) #Calculate uncertainty for two correlated Poisson distributions
+
+                    ratio_mag2unmag = np.divide(mapmag_reduced, map_reduced) #Determine ratio
+                    
+                    ratio_list_j.append(ratio_mag2unmag)
+                    magn_list_j.append(magn_reduced)
+                    unc_list_j.append(uncertainty)
+                    n += 1
+                
+                ratio_list.append(ratio_list_j)
+                magn_list.append(magn_list_j)
+                unc_list.append(unc_list_j)
+                
+            else:
+                raise Exception('If tessellation is desired, please specify the HealPix nside for the tessellation.')
+
+        else:
+            c_map, magn_map, npix_index        = hp_map_strong(ra_j, dec_j, kappa_j, gamma_1_j, gamma_2_j, z_j, nside) #Create unmagnified HealPix map
+            mapmag, magn_mapmag, npix_indexmag = hp_map_strong(ramag_j, decmag_j, kappamag_j, gamma_1mag_j, gamma_2mag, j, zmag_j, nside) #Create magnified HealPix map
+
+            npix_index = np.unique(np.concatenate((npix_index, npix_indexmag), axis=0)) #Take all non-zero pixels from either sample
+
+            #test_field(ra_j, dec_j, ramag_j, decmag_j, nside, npix_index, dilution) #May call test function here to find if the field is disregarding any pixels in the field (for suffienctly low resolutions, it should pass the test)
+
+            map_reduced          = c_map[npix_index]
+            mapmag_reduced       = mapmag[npix_index]
+            magn_mapmag_reduced = magn_mapmag[npix_index]
+
+            zero_to_one = np.where(map_reduced == 0)[0] #Find any edge cases
+            one_to_zero = np.where(mapmag_reduced == 0)[0]
+            to_remove = np.concatenate((zero_to_one, one_to_zero))
+
+            print('Excluded {1} pixels with counts going from 0 to 1: {0}'.format(np.array2string(zero_to_one, separator = ','), len(zero_to_one)))
+            print('Excluded {1} pixels with counts going from 1 to 0: {0}'.format(np.array2string(one_to_zero, separator = ','), len(one_to_zero)))
+
+            mapmag_reduced  = np.delete(mapmag_reduced, to_remove) #Remove edge cases
+            magn_reduced_j = np.delete(magn_mapmag_reduced, to_remove)
+            map_reduced     = np.delete(map_reduced, to_remove)
+
+            vec           = np.array([map_reduced, mapmag_reduced])
+            cov           = np.cov(vec)
+            corr          = cov[0][1]/(np.std(vec[0])*np.std(vec[1])) #Determine Pearson correlation factor between samples
+            ratio         = np.divide(mapmag_reduced, map_reduced)
+            uncertainty_j = np.multiply(np.divide(1, map_reduced), np.sqrt(np.absolute(np.multiply(mapmag_reduced, 1 + ratio - 2*corr*np.sqrt(ratio))))) #Calculate uncertainty for two correlated Poisson distributions
+
+            ratio_mag2unmag_j = np.divide(mapmag_reduced, map_reduced) #Determine relative difference
+            
+            ratio_list.append(ratio_mag2unmag_j)
+            magn_list.append(magn_reduced_j)
+            unc_list.append(uncertainty_j)
+    
+    ratio_list   = np.array(ratio_list)
+    magn_list    = np.array(magn_list)
+    unc_list     = np.array(unc_list)
+    
+    return ratio_list, magn_list, unc_list
+
+
 def f(A, x):
   "Linear function for fitting"
   return A*x
@@ -436,24 +642,23 @@ def fit_kappa_vs_diff_tiled(reldiff_list, kappa_list, unc_list, nside, nside_tes
             
             if plots == True:
                 
-                plt.errorbar(kappa, reldiff, yerr = unc,  fmt =  'o', ecolor =  'gray', ms = 0.5, lw = 0.1)
+                plt.errorbar(kappa, reldiff, yerr = unc,  fmt =  'o', ecolor =  'gray', ms = 4, lw = 0.2)
                 if least_squares == True:
-                    plt.plot(kappa, kappa*popt[0], lw = 0.1, c = 'k', label = r'$\alpha = {a} \pm {b}; slope = {d} \pm {e}$'.format(a = round(alpha, 2), b = round(a_unc, 2), d = round(popt[0], 2), e = round(perr, 2))) 
+                    plt.plot(kappa, kappa*popt[0], lw = 0.5, c = 'k', label = r'$\alpha_{{\kappa}} = {a} \pm {b}; \rm{{slope}} = {d} \pm {e}$'.format(a = round(alpha, 2), b = round(a_unc, 2), d = round(popt[0], 2), e = round(perr, 2))) 
                 else:
-                    plt.plot(kappa, kappa*popt[0], lw = 0.1, c = 'k', label = r'$\alpha = {a} \pm {b}; slope = {d} \pm {e}; \frac{{\chi^{{2}}}}{{N_{{pixels}}-1}} =$ {c}'.format(a = round(alpha, 2), b = round(a_unc, 2), c = round(goodness_of_fit, 2), d = round(popt[0], 2), e = round(perr, 2))) 
+                    plt.plot(kappa, kappa*popt[0], lw = 0.5, c = 'k', label = r'$\alpha_{{\kappa}} = {a} \pm {b}; \rm{{slope}} = {d} \pm {e}; \frac{{\chi^{{2}}}}{{N_{{pixels}}-1}} =$ {c}'.format(a = round(alpha, 2), b = round(a_unc, 2), c = round(goodness_of_fit, 2), d = round(popt[0], 2), e = round(perr, 2))) 
                 
-                plt.plot(kappa, kappa*(popt[0]+perr), lw = 0.1, c = 'k', ls = 'dotted')
-                plt.plot(kappa, kappa*(popt[0]-perr), lw = 0.1, c = 'k', ls = 'dotted') 
+                plt.plot(kappa, kappa*(popt[0]+perr), lw = 0.5, c = 'k', ls = 'dotted')
+                plt.plot(kappa, kappa*(popt[0]-perr), lw = 0.5, c = 'k', ls = 'dotted') 
                 
                 plt.ylabel(r'$\frac{N - N_{0}}{N_{0}}$')
                 plt.xlabel(r'$\overline{\kappa}$')
                 plt.ylim([-1, 1])
-                plt.legend()
                 plt.ylim([-0.25, 0.25])
                 plt.legend(prop={'size': 12})
                 plt.tight_layout(pad=0.8)
                 
-                if redshift_range.all() == None:
+                if redshift_range.all() == None:    
                     plt.savefig(path + '/{0}_{1}_kappa_vs_countdiff_fit_tiles_nside={4}_tile={2}_dilution={3}.pdf'.format(nside, tag, j, dilution, nside_tes))
                 else:
                     plt.savefig(path + '/{0}_{1}_kappa_vs_countdiff_fit_tiles_nside={6}_tile={2}_z_in_{3}-{4}_dilution={5}.pdf'.format(nside, tag, j, round(redshift_range[i], 3), round(redshift_range[i+1], 3), dilution, nside_tes))
@@ -495,15 +700,15 @@ def fit_kappa_vs_diff_tiled(reldiff_list, kappa_list, unc_list, nside, nside_tes
         
         if plots == True:
             if least_squares == True:
-                marker, color_marker = 1.0, 0.0
+                marker, color_marker = 3.0, 0.0
             else:
-                marker, color_marker = 0.0, 1.0
+                marker, color_marker = 0.0, 3.0
                 
             plt.scatter(tiles_j, alpha_list_j, c = gof_list_j, s = color_marker)
-            plt.errorbar(tiles_j, alpha_list_j, yerr = a_unc_list_j, fmt =  'o', ecolor =  'gray', ms = marker, lw = 0.05)
-            plt.plot(tiles_j, np.repeat(alpha_est, len(tiles_j)), lw = 0.1, c = 'k', label = r'$\alpha = {0} \pm {1}$'.format(round(alpha_est, 2), round(alpha_unc, 2)))
-            plt.plot(tiles_j, np.repeat(alpha_est+alpha_unc, len(tiles_j)), lw = 0.1, c = 'k', ls = 'dotted')
-            plt.plot(tiles_j, np.repeat(alpha_est-alpha_unc, len(tiles_j)), lw = 0.1, c = 'k', ls = 'dotted')
+            plt.errorbar(tiles_j, alpha_list_j, yerr = a_unc_list_j, fmt =  'o', ecolor =  'gray', ms = marker, lw = 0.1)
+            plt.plot(tiles_j, np.repeat(alpha_est, len(tiles_j)), lw = 0.5, c = 'k', label = r'$\alpha = {0} \pm {1}$'.format(round(alpha_est, 2), round(alpha_unc, 2)))
+            plt.plot(tiles_j, np.repeat(alpha_est+alpha_unc, len(tiles_j)), lw = 0.5, c = 'k', ls = 'dotted')
+            plt.plot(tiles_j, np.repeat(alpha_est-alpha_unc, len(tiles_j)), lw = 0.5, c = 'k', ls = 'dotted')
             
             if least_squares == False:
                 plt.colorbar(label = 'G.o.F.')
@@ -534,6 +739,172 @@ def fit_kappa_vs_diff_tiled(reldiff_list, kappa_list, unc_list, nside, nside_tes
     
     return alpha_list, alpha_unc_list, gof_list, npix_list, tiles, alpha_est_list, alpha_est_unc_list
 
+
+def fit_ratio_vs_magn_tiled(ratio_list, magn_list, unc_list, nside, nside_tes, redshift_range=np.array([None]), least_squares = True, dilution = True,  mag_limited = False, mag_limit_band = None, mag_limit = None, plots = False, tag = None):
+    """Produces a linear fit of the relation of the count ratio vs. the log of the magnification factor (mu). Then, estimates the final alpha estimate for each redshift bin by taking the average of the alpha values from each tile.
+
+    IN:
+    - ratio_list (numpy.ndarray):           Ratio between the magnified number counts and the unmagnified number counts for each redshift bin and each tile (dim = no. redshift bins x no. of tiles x no. of pixels in each tile)
+    - magn_list (numpy.ndarray):            Mean value of the magnification factor within each pixel, for each redshift bin and each tile (dim = no. redshift bins x no. of tiles x no. of pixels in each tile)
+    - unc_list (numpy.ndarray):             Uncertainty on the ratios within each pixel, for each redshift bin and each tile (dim = no. redshift bins x no. of tiles x no. of pixels in each tile)
+    - nside (int):                          Resolution of the HealPix pixelation. Must be a power of 2
+    - nside_tes (int):                      Resolution of the HealPix pixelation used for the tiles. Must be a power of 2
+    - redshift_range (iterable):            n-componenet iterable object specifying the limits of the desired redshift bins
+    - least_squares (bool)                  Type of fitting desired for the linear fit within each tile. If true, least squares fit is applied. If False, applies a weighted fit based on the Poisson noise associated with the counts in each pixel
+    - dilution (bool):                      If True, coordinates after magnification are considered and dilution factor is included in analysis of magnification
+    - mag_limited (bool):                   If True, the galaxy sample is treated as if it has a definate magnitude limit. In that case, one needs to specify the mag_limit_band and the mag_limit
+    - mag_limit_band (str):                 String containing the name of the column which contains the band magnitude with which the flux/magnitude limit of the sample has been set
+    - mag_limit (float):                    Float specifying the magnitude limit in the band magnitude specifid in mag_limit_band
+    - plots (bool):                         If True, produces and saves figures of the fit in each tile and redshift bin
+    - tag (str):                            String used as a distinguishing tag within the figure names. Only necessary, if plots == True
+    
+    OUT:
+    - alpha_list (numpy.ndarray):           Alpha estimates obtained from the linear fit of the data in each tile and redshift bin (dim = no. redshift bins x no. of tiles )
+    - alpha_unc_list (numpy.ndarray):       Uncertainty of the alpha estimates obtained from the linear fit of the data in each tile and redshift bin (dim = no. redshift bins x no. of tiles)
+    - gof_list (numpy.ndarray):             Goodness of fit the linear fit of the data in each tile and redshift bin (dim = no. redshift bins x no. of tiles). If least_squares == True, all G.o.F.s will equal to 1. (dim = no. redshift bins x no. of tiles)
+    - npix_list (numpy.ndarray):            Number of npix pixels contained in each tile within each redshift bin (dim = no. redshift bins x no. of tiles)
+    - tiles (numpy.ndarray):                Number ID of each tile contained within each redshift bin (dim = no. redshift bins x no. of tiles)
+    - alpha_est_list (numpy.ndarray):       Final alpha estimate for each redshift bin
+    - alpha_est_unc_list (numpy.ndarray):   Uncertainty of the final estimate for each redshift bin
+
+    """
+    if plots == True and tag == None:
+        raise Exception('If diagnostic plots of the the ratio vs. magnification relation in each tile are desired, please provide a tag.')
+    
+    alpha_list, a_unc_list, gof_list, npix_list, tiles = [], [], [], [], []
+    alpha_est_list, alpha_est_unc_list = [],  []
+    
+    for i in range(0, len(ratio_list)):
+        alpha_list_j, a_unc_list_j, gof_list_j, npix_list_j = [], [], [], []
+        
+        if redshift_range.all() != None:
+            path = 'ratio_vs_magn_plots/z_{0}_to_{1}'.format(round(redshift_range[i], 3), round(redshift_range[i+1], 3))
+        else:
+            path = 'ratio_vs_magn_plots/All_z'
+            
+        if plots == True and not os.path.isdir(path):
+            os.makedirs(path)
+        
+        for j in range(0, len(ratio_list[i])):
+            ratio, magn, unc = np.log(ratio_list[i][j]), np.log(magn_list[i][j]), np.multiply(unc_list[i][j], np.power(ratio_list[i][j], -1))
+            if least_squares == True:
+                popt, pcov = curve_fit(f, magn, ratio)
+                gof_list_j.append(1)
+            else:
+                popt, pcov      = curve_fit(f, magn, ratio, sigma = unc) #Fit a straight line to these values
+                pull            = np.divide(ratio - popt[0]*magn, unc)
+                chi_squared     = np.sum(pull**2)
+                goodness_of_fit = chi_squared/(len(ratio)-1)
+                
+                gof_list_j.append(goodness_of_fit)
+    
+            perr  = np.sqrt(np.diag(pcov))[0]
+            a_unc = perr
+            
+            if dilution == False:
+                alpha = popt[0]
+            else:
+                alpha = popt[0] + 1
+            
+            if plots == True:
+                
+                plt.errorbar(magn, ratio, yerr = unc,  fmt =  'o', ecolor =  'gray', ms = 3, lw = 0.2)
+                if least_squares == True:
+                    plt.plot(magn, magn*popt[0], lw = 0.5, c = 'k', label = r'$\alpha_{{\mu}} = {a} \pm {b}; \rm{{slope}} = {d} \pm {e}$'.format(a = round(alpha, 2), b = round(a_unc, 2), d = round(popt[0], 2), e = round(perr, 2))) 
+                else:
+                    plt.plot(magn, magn*popt[0], lw = 0.5, c = 'k', label = r'$\alpha_{{\mu}} = {a} \pm {b}; \rm{{slope}} = {d} \pm {e}; \frac{{\chi^{{2}}}}{{N_{{pixels}}-1}} =$ {c}'.format(a = round(alpha, 2), b = round(a_unc, 2), c = round(goodness_of_fit, 2), d = round(popt[0], 2), e = round(perr, 2))) 
+                
+                plt.plot(magn, magn*(popt[0]+perr), lw = 0.5, c = 'k', ls = 'dotted')
+                plt.plot(magn, magn*(popt[0]-perr), lw = 0.5, c = 'k', ls = 'dotted') 
+                
+                plt.ylabel(r'$\rm{log}(\frac{N}{N_{0}})$')
+                plt.xlabel(r'$\rm{log}(\overline{\mu})$')
+                plt.ylim([-0.3, 0.3])
+                plt.legend()
+                plt.ylim([-0.05, 0.05])
+                plt.legend(prop={'size': 12})
+                plt.tight_layout(pad=0.8)
+                
+                if redshift_range.all() == None:
+                    plt.savefig(path + '/{0}_{1}_ratio_vs_magn_fit_tiles_nside={4}_tile={2}_dilution={3}.pdf'.format(nside, tag, j, dilution, nside_tes))
+                else:
+                    plt.savefig(path + '/{0}_{1}_ratio_vs_magn_fit_tiles_nside={6}_tile={2}_z_in_{3}-{4}_dilution={5}.pdf'.format(nside, tag, j, round(redshift_range[i], 3), round(redshift_range[i+1], 3), dilution, nside_tes))
+                
+                plt.close('all')
+            
+            alpha_list_j.append(alpha)
+            a_unc_list_j.append(a_unc)
+            npix_list_j.append(len(ratio))
+        
+        tiles_j = list(range(0, len(ratio_list[i])))
+        # Remove outlier found in sample (due to inaccurate uncertainties of the galaxy number counts in the MICE2 simulations)
+        if nside == 64 and nside_tes == 4 and redshift_range[i] == 0.2 and redshift_range[i+1] == 0.5 and least_squares == True and dilution == True:
+            print('Removed outlier tile: 4')
+            del alpha_list_j[4]
+            del a_unc_list_j[4]
+            del gof_list_j[4]
+            del npix_list_j[4]
+            del tiles_j[4]
+        
+        alpha_list.append(alpha_list_j)
+        a_unc_list.append(a_unc_list_j)
+        gof_list.append(gof_list_j)
+        npix_list.append(npix_list_j)
+        tiles.append(tiles_j)
+        
+        alpha_list_j = np.array(alpha_list_j)
+        a_unc_list_j = np.array(a_unc_list_j)
+        gof_list_j   = np.array(gof_list_j)
+        npix_list_j  = np.array(npix_list_j)
+        tiles_j      = np.array(tiles_j)
+        
+        weight    = np.divide(1, a_unc_list_j**2)
+        alpha_est = np.average(alpha_list_j, weights= weight)
+        n_weights = len(np.where(weight != 0)[0])
+        alpha_unc = np.sqrt(np.divide(np.sum(np.multiply(weight, (alpha_list_j - alpha_est)**2)), (n_weights - 1)*np.sum(weight)/n_weights))/np.sqrt(len(alpha_list_j))
+
+        print('Final alpha for z between {2} and {3} = {0} pm {1}'.format(round(alpha_est, 3), round(alpha_unc, 3), round(redshift_range[i], 3), round(redshift_range[i+1], 3)))
+        
+        if plots == True:
+            if least_squares == True:
+                marker, color_marker = 3.0, 0.0
+            else:
+                marker, color_marker = 0.0, 3.0
+                
+            plt.scatter(tiles_j, alpha_list_j, c = gof_list_j, s = color_marker)
+            plt.errorbar(tiles_j, alpha_list_j, yerr = a_unc_list_j, fmt =  'o', ecolor =  'gray', ms = marker, lw = 0.1)
+            plt.plot(tiles_j, np.repeat(alpha_est, len(tiles_j)), lw = 0.5, c = 'k', label = r'$\alpha = {0} \pm {1}$'.format(round(alpha_est, 2), round(alpha_unc, 2)))
+            plt.plot(tiles_j, np.repeat(alpha_est+alpha_unc, len(tiles_j)), lw = 0.5, c = 'k', ls = 'dotted')
+            plt.plot(tiles_j, np.repeat(alpha_est-alpha_unc, len(tiles_j)), lw = 0.5, c = 'k', ls = 'dotted')
+            
+            if least_squares == False:
+                plt.colorbar(label = 'G.o.F.')
+            
+            plt.legend()
+            plt.xlabel(r'Tile index')
+            plt.ylabel(r'$\alpha$') 
+            plt.legend(prop={'size': 12})
+            plt.tight_layout(pad=0.8)
+            
+            if redshift_range.all == None:
+                plt.savefig(path + '/{0}_{1}_magn_alpha_per_tile_tiles_nside={3}_ALL_TILES_dilution={2}.pdf'.format(nside, tag, dilution, nside_tes))
+            else:
+                plt.savefig(path + '/{0}_{1}_magn_alpha_per_tile_tiles_nside={5}_ALL_TILES_z_in_{2}-{3}_dilution={4}.pdf'.format(nside, tag, redshift_range[i], redshift_range[i+1], dilution, nside_tes))
+            plt.close('all')
+        
+        alpha_est_list.append(alpha_est)
+        alpha_est_unc_list.append(alpha_unc)
+              
+    alpha_list     = np.array(alpha_list)
+    alpha_unc_list = np.array(a_unc_list)
+    gof_list       = np.array(gof_list)
+    npix_list      = np.array(npix_list)
+    tiles          = np.array(tiles)
+
+    alpha_est_list     = np.array(alpha_est_list)
+    alpha_est_unc_list = np.array(alpha_est_unc_list)
+    
+    return alpha_list, alpha_unc_list, gof_list, npix_list, tiles, alpha_est_list, alpha_est_unc_list
 
 
 def get_magnitude_counts(magnitudes, z, bin_edges, redshift_range=np.array([None]), magnified = True, mag_limited = False, mag_limit = None):
@@ -698,9 +1069,12 @@ def get_calibration(alpha_est_list, alpha_est_unc_list, alpha_nc_list, turn_off_
             alpha     = np.average(near_turnoff_i, weights = weight)
             n_weights = len(np.where(weight != 0)[0])
             alpha_unc = np.sqrt(np.divide(np.sum(np.multiply(weight, (near_turnoff_i - alpha)**2)), (n_weights - 1)*np.sum(weight)/n_weights))/np.sqrt(len(near_turnoff_i))
+                        
+            overlap = -(abs(alpha - alpha_est)/alpha_est_unc)
             
-            overlap = st.NormalDist(mu=alpha, sigma=alpha_unc).overlap(st.NormalDist(mu=alpha_est, sigma=alpha_est_unc))
-            
+            if np.isnan(alpha_unc):
+                overlap = np.nan
+
             alpha_list_j.append(alpha)
             alpha_unc_list_j.append(alpha_unc)
             overlap_list_j.append(overlap)
